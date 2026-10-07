@@ -29,7 +29,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "local.servertaming";
 
-	public const string Version = "1.1.1";
+	public const string Version = "1.1.2";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -545,8 +545,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		string data = chest.GetString(ZDOVars.s_items);
-		if (string.IsNullOrEmpty(data))
+		// Chests store their inventory as a raw ZPackage byte array (Container.Save).
+		byte[] data = chest.GetByteArray(ZDOVars.s_items);
+		if (data == null || data.Length == 0)
 		{
 			return false;
 		}
@@ -607,7 +608,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			{
 				chest.SetOwner(ZDOMan.GetSessionID());
 			}
-			chest.Set(ZDOVars.s_items, new ZPackage(result).GetBase64());
+			chest.Set(ZDOVars.s_items, result);
 			return true;
 		}
 		return false;
@@ -892,7 +893,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		{
 			Resolve();
 		}
+		_feeding = ReadFeeding();
 		Collect();
+		UpdateChestRanges();
 		double now = ZNet.instance.GetTimeSeconds();
 		List<ZDO> near = _animals.Where(z => (z.GetPosition() - center.Value).sqrMagnitude <= radius * radius)
 			.OrderBy(z => (z.GetPosition() - center.Value).sqrMagnitude).ToList();
@@ -924,6 +927,49 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 				text = $"tamed, love {st.Love}/{_requiredLovePoints.Value}, {fed}";
 			}
 			Print(output, $"{s.Prefab} {new string('*', Math.Max(0, stars))} {dist:0} m: {text}");
+		}
+		Print(output, $"Chest feeding: {(_feeding.Containers ? "on" : "off")}{(_feeding.FromTameAssist ? " (TameAssist settings)" : "")}, global range {_feeding.Range:0} m, leave at least {_feeding.LeaveAtLeast}, wild animals {(_feedWildFromContainers.Value ? "yes" : "no")}.");
+		HashSet<int> allFoods = new HashSet<int>(_species.SelectMany(x => x.FoodHashes));
+		foreach (ZDO chest in _chests.Where(c => (c.GetPosition() - center.Value).sqrMagnitude <= (radius + 64f) * (radius + 64f))
+			.OrderBy(c => (c.GetPosition() - center.Value).sqrMagnitude).Take(10))
+		{
+			string range = _chestRanges.TryGetValue(chest.m_uid, out float chestRange) ? $"range {chestRange:0} m" : "no range (no sign number, global range 0)";
+			Print(output, $"Chest {Vector3.Distance(chest.GetPosition(), center.Value):0} m: {range}, {(chest.GetBool(ZDOVars.s_inUse) ? "OPEN (skipped), " : "")}food: {DescribeFood(chest, allFoods)}");
+		}
+	}
+
+	private static string DescribeFood(ZDO chest, HashSet<int> foods)
+	{
+		byte[] data = chest.GetByteArray(ZDOVars.s_items);
+		if (data == null || data.Length == 0)
+		{
+			return "empty";
+		}
+		try
+		{
+			ZPackage pkg = new ZPackage(data);
+			int version = pkg.ReadInt();
+			if (version < (int)global::Version.Item.Smaller)
+			{
+				return $"old inventory format {version}, skipped";
+			}
+			int count = pkg.ReadUShort();
+			Dictionary<int, int> totals = new Dictionary<int, int>();
+			for (int i = 0; i < count; i++)
+			{
+				ItemDrop.ItemData item = new ItemDrop.ItemData();
+				int hash = ItemDrop.ItemData.Load(pkg, item, (global::Version.Item)version);
+				if (foods.Contains(hash))
+				{
+					totals[hash] = (totals.TryGetValue(hash, out int t) ? t : 0) + item.m_stack;
+				}
+			}
+			return totals.Count == 0 ? $"none ({count} other item stacks)"
+				: string.Join(", ", totals.Select(x => (ZNetScene.instance.GetPrefab(x.Key)?.name ?? x.Key.ToString(CultureInfo.InvariantCulture)) + " " + x.Value));
+		}
+		catch (Exception ex)
+		{
+			return "unreadable (" + ex.Message + ")";
 		}
 	}
 
