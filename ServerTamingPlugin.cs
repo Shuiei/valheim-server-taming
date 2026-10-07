@@ -29,7 +29,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "local.servertaming";
 
-	public const string Version = "1.1.0";
+	public const string Version = "1.1.1";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -459,8 +459,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		return fallback;
 	}
 
-	// A chest's feed range is the global range, or the number after the prefix on its sign
-	// (signs that ServersideQoL ContainerSigns attaches to the chest), capped at MaxRange.
+	// A chest's feed range is the global range, or the number after the prefix in its text, capped at
+	// MaxRange. ServersideQoL ContainerSigns keeps that text on the chest itself and copies it onto signs
+	// it recreates at will, so the chest is checked first and nearby signs only as a fallback.
 	private void UpdateChestRanges()
 	{
 		_chestRanges.Clear();
@@ -470,30 +471,39 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		}
 		foreach (ZDO chest in _chests)
 		{
-			if (_feeding.Range > 0f)
+			if (SignRange(chest) is int range)
+			{
+				_chestRanges[chest.m_uid] = Mathf.Min(range, _feeding.MaxRange);
+			}
+			else if (_feeding.Range > 0f)
 			{
 				_chestRanges[chest.m_uid] = _feeding.Range;
 			}
 		}
-		if (_feeding.SignRange == null)
-		{
-			return;
-		}
 		foreach (ZDO sign in _signs)
 		{
-			Match match = _feeding.SignRange.Match(sign.GetString(ZDOVars.s_text));
-			if (!match.Success || !int.TryParse(match.Groups["R"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int range))
+			if (!(SignRange(sign) is int range))
 			{
 				continue;
 			}
 			Vector3 pos = sign.GetPosition();
-			ZDO chest = _chests.Where(c => (c.GetPosition() - pos).sqrMagnitude <= 2.25f)
+			ZDO chest = _chests.Where(c => (c.GetPosition() - pos).sqrMagnitude <= 9f)
 				.OrderBy(c => (c.GetPosition() - pos).sqrMagnitude).FirstOrDefault();
-			if (chest != null)
+			if (chest != null && SignRange(chest) == null)
 			{
 				_chestRanges[chest.m_uid] = Mathf.Min(range, _feeding.MaxRange);
 			}
 		}
+	}
+
+	private int? SignRange(ZDO zdo)
+	{
+		if (_feeding.SignRange == null)
+		{
+			return null;
+		}
+		Match match = _feeding.SignRange.Match(zdo.GetString(ZDOVars.s_text));
+		return match.Success && int.TryParse(match.Groups["R"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int range) ? range : null;
 	}
 
 	private float TamingSeconds(Species s)

@@ -15,7 +15,7 @@ A server-only BepInEx plugin for Valheim that makes **Deer** and **Necks** tamea
 When ServersideQoL TameAssist is installed (and `UseTameAssistSettings` is on, which is the default), deer and necks follow TameAssist's settings instead of ServerTaming's own:
 
 - **`FeedFromContainers`**, **`FeedFromContainersRange`** and **`FeedFromContainersLeaveAtLeast`** decide which chests the animals eat from, and how much food is always left in them.
-- **Per-chest range from a sign:** a chest sign containing the `FeedFromContainersRangeSignPrefix` (🐗 by default) followed by a number, for example `🐗10`, sets that chest's range. It's capped at `FeedFromContainersMaxRange`. These are the chest signs that ServersideQoL ContainerSigns adds.
+- **Per-chest range from a sign:** a chest whose text (set through its ContainerSigns sign) contains the `FeedFromContainersRangeSignPrefix` (🐗 by default) followed by a number, for example `🐗10`, sets that chest's range. It's capped at `FeedFromContainersMaxRange`. These are the chest signs that ServersideQoL ContainerSigns adds.
 - **`TamingTimeMultiplier`** and **`FedDurationMultiplier`** are applied to `TamingMinutes` and `FedMinutes`.
 - **`TamingProgressMessageType`**, for example `InWorld`, is used for taming progress, with the same "tameness" text as TameAssist.
 
