@@ -29,7 +29,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "local.servertaming";
 
-	public const string Version = "1.1.2";
+	public const string Version = "1.1.3";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -774,10 +774,16 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 	// Creates the offspring directly as a ZDO (like ZNetView.Awake does) so the server does not need
 	// the area loaded; the nearest client takes ownership and instantiates a vanilla tamed adult.
+	// The server has no colliders loaded, so it can't see fences. Both parents are inside the pen, so
+	// the offspring goes somewhere on the line between the mother and her nearest tamed partner, which
+	// stays inside any convex pen; without a partner nearby it appears on the mother.
 	private void Birth(ZDO parent, Species s)
 	{
-		float angle = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-		Vector3 pos = parent.GetPosition() + new Vector3(Mathf.Cos(angle) * 1.5f, 0.5f, Mathf.Sin(angle) * 1.5f);
+		Vector3 mother = parent.GetPosition();
+		ZDO partner = _animals.Where(a => a != parent && a.GetPrefab() == s.Hash && a.GetBool(ZDOVars.s_tamed) && (a.GetPosition() - mother).sqrMagnitude <= 100f)
+			.OrderBy(a => (a.GetPosition() - mother).sqrMagnitude).FirstOrDefault();
+		Vector3 pos = partner == null ? mother : Vector3.Lerp(mother, partner.GetPosition(), UnityEngine.Random.Range(0.3f, 0.7f));
+		pos.y += 0.5f;
 		ZDO zdo = ZDOMan.instance.CreateNewZDO(pos, s.Hash);
 		zdo.Persistent = s.View.m_persistent;
 		zdo.Type = s.View.m_type;
