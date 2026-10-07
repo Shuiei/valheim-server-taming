@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using BepInEx;
+using BepInEx.Bootstrap;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
@@ -17,6 +19,9 @@ namespace ServerTaming;
 //    (Character.RPC_SetTamed), which vanilla clients already understand (no fleeing/attacking players).
 //  - Breeding: fed tamed animals with a tamed partner nearby gain love points, get pregnant and
 //    give birth to a tamed adult of the same prefab (no custom offspring prefab).
+//  - Food can also come from chests, with the same rules as ServersideQoL TameAssist's
+//    FeedFromContainers (global range, per-chest range on a sign, leave-at-least). When TameAssist is
+//    installed its settings and taming/fed multipliers are used, so deer and necks behave like its tames.
 // Progress lives in server memory. Writing it into client-owned ZDOs would be lost to the owner's
 // updates, so it is only copied into the ZDOs (without a revision bump) just before the world saves.
 [BepInPlugin(Guid, "ServerTaming", Version)]
@@ -24,7 +29,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "local.servertaming";
 
-	public const string Version = "1.0.0";
+	public const string Version = "1.1.0";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -33,6 +38,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private static readonly int KeyLove = "ServerTaming_love".GetStableHashCode();
 
 	private static readonly int KeyPregnant = "ServerTaming_pregnant".GetStableHashCode();
+
+	private const string TameAssistGuid = "ArgusMagnus.ServersideQoL.TameAssist";
 
 	private static ServerTamingPlugin _instance;
 
@@ -47,6 +54,14 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private ConfigEntry<bool> _progressMessages;
 
 	private ConfigEntry<int> _maxTameStars;
+
+	private ConfigEntry<bool> _useTameAssist;
+
+	private ConfigEntry<bool> _feedWildFromContainers;
+
+	private ConfigEntry<float> _containerRange;
+
+	private ConfigEntry<int> _leaveAtLeast;
 
 	private ConfigEntry<float> _breedCheckSeconds;
 
@@ -77,6 +92,45 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private readonly List<ZDO> _foods = new List<ZDO>();
 
 	private readonly HashSet<ZDOID> _eaten = new HashSet<ZDOID>();
+
+	private readonly List<ZDO> _chests = new List<ZDO>();
+
+	private readonly List<ZDO> _signs = new List<ZDO>();
+
+	private readonly Dictionary<ZDOID, float> _chestRanges = new Dictionary<ZDOID, float>();
+
+	private readonly Dictionary<int, PrefabKind> _kinds = new Dictionary<int, PrefabKind>();
+
+	private Feeding _feeding = new Feeding();
+
+	private enum PrefabKind
+	{
+		Other,
+		Chest,
+		Sign
+	}
+
+	// Container feeding and time multipliers, from TameAssist when it is installed.
+	private sealed class Feeding
+	{
+		public bool FromTameAssist;
+
+		public bool Containers;
+
+		public float Range;
+
+		public Regex SignRange;
+
+		public int MaxRange = 64;
+
+		public int LeaveAtLeast;
+
+		public float TamingMultiplier = 1f;
+
+		public float FedMultiplier = 1f;
+
+		public string ProgressMessageType = "";
+	}
 
 	private bool _resolved;
 
@@ -133,8 +187,12 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		_feedRadius = Config.Bind("General", "FeedRadius", 8f, "Animals eat matching food lying within this many metres. They do not walk to it, so keep them penned with the food inside.");
 		_requireCalm = Config.Bind("General", "RequireCalm", true, "Taming and breeding pause while the animal is alerted (fleeing or fighting), like vanilla.");
 		_messageRange = Config.Bind("General", "MessageRange", 30f, "Players within this many metres see taming and birth messages.");
-		_progressMessages = Config.Bind("General", "ProgressMessages", true, "Show taming progress at 25/50/75% to nearby players.");
+		_progressMessages = Config.Bind("General", "ProgressMessages", true, "Show taming progress to nearby players: at 25/50/75%, or with TameAssist's TamingProgressMessageType when TameAssist is used.");
 		_maxTameStars = Config.Bind("General", "MaxTameStars", -1, "Highest star count that can be tamed; -1 means any (including the 3+ star creatures from level mods such as ServersideQoL CreatureLevelUp). Offspring keep their parent's stars.");
+		_useTameAssist = Config.Bind("Containers", "UseTameAssistSettings", true, "When ServersideQoL TameAssist is installed, use its FeedFromContainers settings (range, chest sign range, LeaveAtLeast), its TamingTimeMultiplier and FedDurationMultiplier, and its TamingProgressMessageType. The two settings below are then ignored.");
+		_containerRange = Config.Bind("Containers", "FeedFromContainersRange", 0f, "Without TameAssist: animals eat from chests within this many metres (0 = off).");
+		_leaveAtLeast = Config.Bind("Containers", "LeaveAtLeast", 1, "Without TameAssist: keep at least this many of each food in a chest.");
+		_feedWildFromContainers = Config.Bind("Containers", "FeedWildFromContainers", true, "Wild animals being tamed also eat from chests (TameAssist itself only feeds tamed animals from chests, but deer and necks can't walk to food).");
 		_breedCheckSeconds = Config.Bind("Breeding", "CheckSeconds", 30f, "How often each fed tamed animal tries to gain a love point.");
 		_loveChance = Config.Bind("Breeding", "LoveChance", 0.5f, "Chance (0-1) of gaining a love point on each check when a partner is near.");
 		_requiredLovePoints = Config.Bind("Breeding", "RequiredLovePoints", 4, "Love points needed to become pregnant.");
@@ -233,7 +291,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		{
 			return;
 		}
+		_feeding = ReadFeeding();
 		Collect();
+		UpdateChestRanges();
 		_eaten.Clear();
 		foreach (ZDO zdo in _animals)
 		{
@@ -247,12 +307,12 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			bool calm = !_requireCalm.Value || !zdo.GetBool(ZDOVars.s_alert);
 			if (now >= st.FedUntil)
 			{
-				TryEat(zdo, s, st, now);
+				TryEat(zdo, s, st, now, tamed);
 			}
 			bool fed = now < st.FedUntil;
 			if (!tamed)
 			{
-				UpdateTaming(zdo, s, st, fed && calm, dt);
+				UpdateTaming(zdo, s, st, fed, calm, dt);
 			}
 			else if (s.Breeding.Value)
 			{
@@ -273,6 +333,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	{
 		_animals.Clear();
 		_foods.Clear();
+		_chests.Clear();
+		_signs.Clear();
 		_seen.Clear();
 		SimulationDistance synced = ZNet.instance.GetSyncedSimulationDistance();
 		SimulationDistance near = new SimulationDistance(synced.NearSimulationDistance, 0, synced.IsClassic);
@@ -300,6 +362,18 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 				{
 					_foods.Add(zdo);
 				}
+				else if (_feeding.Containers)
+				{
+					switch (Classify(prefab))
+					{
+					case PrefabKind.Chest:
+						_chests.Add(zdo);
+						break;
+					case PrefabKind.Sign:
+						_signs.Add(zdo);
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -321,7 +395,215 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		return st;
 	}
 
-	private void TryEat(ZDO animal, Species s, State st, double now)
+	private PrefabKind Classify(int prefab)
+	{
+		if (!_kinds.TryGetValue(prefab, out PrefabKind kind))
+		{
+			GameObject go = ZNetScene.instance.GetPrefab(prefab);
+			kind = go == null ? PrefabKind.Other
+				: go.GetComponent<Container>() != null && go.GetComponent<Piece>() != null ? PrefabKind.Chest
+				: go.GetComponent<Sign>() != null ? PrefabKind.Sign
+				: PrefabKind.Other;
+			_kinds[prefab] = kind;
+		}
+		return kind;
+	}
+
+	// Mirrors TameAssist's config; read every tick so changes to its config file apply live.
+	private Feeding ReadFeeding()
+	{
+		Feeding f = new Feeding();
+		// With ServersideQoL's UnifiedConfig the entries live in the core plugin's file under "<core>.TameAssist".
+		List<ConfigFile> ta = !_useTameAssist.Value || !Chainloader.PluginInfos.ContainsKey(TameAssistGuid) ? null
+			: Chainloader.PluginInfos.Values.Where(i => i.Metadata.GUID.StartsWith("ArgusMagnus.ServersideQoL", StringComparison.Ordinal) && i.Instance != null)
+				.Select(i => i.Instance.Config).ToList();
+		if (ta != null && Get(ta, "Enabled", true))
+		{
+			f.FromTameAssist = true;
+			f.Containers = Get(ta, "FeedFromContainers", false);
+			f.Range = Get(ta, "FeedFromContainersRange", 0f);
+			f.MaxRange = Get(ta, "FeedFromContainersMaxRange", 64);
+			f.LeaveAtLeast = Get(ta, "FeedFromContainersLeaveAtLeast", 1);
+			f.TamingMultiplier = Get(ta, "TamingTimeMultiplier", 1f);
+			f.FedMultiplier = Get(ta, "FedDurationMultiplier", 1f);
+			f.ProgressMessageType = Get(ta, "TamingProgressMessageType", (object)"").ToString();
+			// Same pattern as ServersideQoL ContainerSigns: the prefix (with or without emoji variation selector) then a number.
+			string prefix = Get(ta, "FeedFromContainersRangeSignPrefix", "");
+			string bare = prefix.Replace("\ufe0f", "");
+			if (prefix.Length > 0)
+			{
+				f.SignRange = new Regex((prefix == bare ? Regex.Escape(prefix) : "(?:" + Regex.Escape(prefix) + "|" + Regex.Escape(bare) + ")") + "(?<R>\\d+)");
+			}
+		}
+		else
+		{
+			f.Range = _containerRange.Value;
+			f.Containers = f.Range > 0f;
+			f.LeaveAtLeast = _leaveAtLeast.Value;
+		}
+		return f;
+	}
+
+	private static T Get<T>(List<ConfigFile> configs, string key, T fallback)
+	{
+		foreach (ConfigFile config in configs)
+		{
+			foreach (ConfigDefinition def in config.Keys)
+			{
+				if (def.Key == key && (def.Section == "TameAssist" || def.Section.EndsWith(".TameAssist", StringComparison.Ordinal)) && config[def].BoxedValue is T value)
+				{
+					return value;
+				}
+			}
+		}
+		return fallback;
+	}
+
+	// A chest's feed range is the global range, or the number after the prefix on its sign
+	// (signs that ServersideQoL ContainerSigns attaches to the chest), capped at MaxRange.
+	private void UpdateChestRanges()
+	{
+		_chestRanges.Clear();
+		if (!_feeding.Containers)
+		{
+			return;
+		}
+		foreach (ZDO chest in _chests)
+		{
+			if (_feeding.Range > 0f)
+			{
+				_chestRanges[chest.m_uid] = _feeding.Range;
+			}
+		}
+		if (_feeding.SignRange == null)
+		{
+			return;
+		}
+		foreach (ZDO sign in _signs)
+		{
+			Match match = _feeding.SignRange.Match(sign.GetString(ZDOVars.s_text));
+			if (!match.Success || !int.TryParse(match.Groups["R"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int range))
+			{
+				continue;
+			}
+			Vector3 pos = sign.GetPosition();
+			ZDO chest = _chests.Where(c => (c.GetPosition() - pos).sqrMagnitude <= 2.25f)
+				.OrderBy(c => (c.GetPosition() - pos).sqrMagnitude).FirstOrDefault();
+			if (chest != null)
+			{
+				_chestRanges[chest.m_uid] = Mathf.Min(range, _feeding.MaxRange);
+			}
+		}
+	}
+
+	private float TamingSeconds(Species s)
+	{
+		return Mathf.Max(1f, s.TamingMinutes.Value * 60f * _feeding.TamingMultiplier);
+	}
+
+	private void TryEat(ZDO animal, Species s, State st, double now, bool tamed)
+	{
+		if (TryEatFromGround(animal, s) || ((tamed || _feedWildFromContainers.Value) && TryEatFromChest(animal, s)))
+		{
+			st.FedUntil = now + s.FedMinutes.Value * 60.0 * _feeding.FedMultiplier;
+		}
+	}
+
+	private bool TryEatFromChest(ZDO animal, Species s)
+	{
+		if (!_feeding.Containers)
+		{
+			return false;
+		}
+		Vector3 pos = animal.GetPosition();
+		foreach (ZDO chest in _chests.OrderBy(c => (c.GetPosition() - pos).sqrMagnitude))
+		{
+			if (_chestRanges.TryGetValue(chest.m_uid, out float range) && (chest.GetPosition() - pos).sqrMagnitude <= range * range && TakeOneFood(chest, s.FoodHashes, _feeding.LeaveAtLeast))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Takes one food item out of a chest by editing its saved inventory bytes in place: a stack is
+	// decremented or the item entry removed. Working on the bytes keeps every other item exactly as it
+	// was, even items the server's ObjectDB doesn't know.
+	private static bool TakeOneFood(ZDO chest, HashSet<int> foods, int leaveAtLeast)
+	{
+		if (chest.GetBool(ZDOVars.s_inUse))
+		{
+			return false;
+		}
+		string data = chest.GetString(ZDOVars.s_items);
+		if (string.IsNullOrEmpty(data))
+		{
+			return false;
+		}
+		byte[] bytes;
+		int count;
+		List<(int Start, int End, int Hash, int Stack)> items = new List<(int, int, int, int)>();
+		try
+		{
+			ZPackage pkg = new ZPackage(data);
+			int version = pkg.ReadInt();
+			if (version < (int)global::Version.Item.Smaller)
+			{
+				return false;
+			}
+			count = pkg.ReadUShort();
+			for (int i = 0; i < count; i++)
+			{
+				int start = pkg.GetPos();
+				ItemDrop.ItemData item = new ItemDrop.ItemData();
+				int hash = ItemDrop.ItemData.Load(pkg, item, (global::Version.Item)version);
+				items.Add((start, pkg.GetPos(), hash, item.m_stack));
+			}
+			bytes = pkg.GetArray();
+		}
+		catch (Exception)
+		{
+			return false;
+		}
+		foreach (int food in foods)
+		{
+			List<(int Start, int End, int Hash, int Stack)> stacks = items.Where(x => x.Hash == food && x.Stack > 0).OrderBy(x => x.Stack).ToList();
+			if (stacks.Sum(x => x.Stack) - 1 < Math.Max(0, leaveAtLeast))
+			{
+				continue;
+			}
+			var target = stacks[0];
+			// Item layout: int durability, byte x, byte y, byte worldLevel, byte flags, [ushort quality], [ushort stack], ...
+			byte flags = bytes[target.Start + 7];
+			byte[] result;
+			if (target.Stack > 1 && (flags & 8) != 0)
+			{
+				result = (byte[])bytes.Clone();
+				int offset = target.Start + 8 + ((flags & 4) != 0 ? 2 : 0);
+				ushort stack = (ushort)(target.Stack - 1);
+				result[offset] = (byte)(stack & 0xFF);
+				result[offset + 1] = (byte)(stack >> 8);
+			}
+			else
+			{
+				result = new byte[bytes.Length - (target.End - target.Start)];
+				Buffer.BlockCopy(bytes, 0, result, 0, target.Start);
+				Buffer.BlockCopy(bytes, target.End, result, target.Start, bytes.Length - target.End);
+				ushort remaining = (ushort)(count - 1);
+				result[4] = (byte)(remaining & 0xFF);
+				result[5] = (byte)(remaining >> 8);
+			}
+			if (!chest.IsOwner())
+			{
+				chest.SetOwner(ZDOMan.GetSessionID());
+			}
+			chest.Set(ZDOVars.s_items, new ZPackage(result).GetBase64());
+			return true;
+		}
+		return false;
+	}
+
+	private bool TryEatFromGround(ZDO animal, Species s)
 	{
 		Vector3 pos = animal.GetPosition();
 		float best = _feedRadius.Value * _feedRadius.Value;
@@ -346,7 +628,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		}
 		if (food == null)
 		{
-			return;
+			return false;
 		}
 		// Own the item before changing it so the client that simulated it cannot overwrite the change.
 		if (!food.IsOwner())
@@ -363,25 +645,31 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			_eaten.Add(food.m_uid);
 			ZDOMan.instance.DestroyZDO(food);
 		}
-		st.FedUntil = now + s.FedMinutes.Value * 60.0;
+		return true;
 	}
 
-	private void UpdateTaming(ZDO zdo, Species s, State st, bool progressing, float dt)
+	private void UpdateTaming(ZDO zdo, Species s, State st, bool fed, bool calm, float dt)
 	{
-		float total = Mathf.Max(1f, s.TamingMinutes.Value * 60f);
+		float total = TamingSeconds(s);
 		if (st.TameLeft < 0f || st.TameLeft > total)
 		{
 			st.TameLeft = total;
 		}
-		if (progressing && st.TameLeft > 0f)
+		if (fed && calm && st.TameLeft > 0f)
 		{
 			int before = Step(st.TameLeft, total);
 			st.TameLeft = Mathf.Max(0f, st.TameLeft - dt);
 			int after = Step(st.TameLeft, total);
-			if (_progressMessages.Value && after > before && after < 4)
+			if (_progressMessages.Value && !_feeding.FromTameAssist && after > before && after < 4)
 			{
 				Message(zdo.GetPosition(), MessageHud.MessageType.TopLeft, $"{s.Name}: taming {after * 25}%");
 			}
+		}
+		// Like TameAssist: once taming has started, show progress with its message type on every update.
+		if (_progressMessages.Value && _feeding.FromTameAssist && st.TameLeft > 0f && st.TameLeft < total)
+		{
+			string text = string.Format(fed ? "$hud_tameness {0:P0}" : "$hud_tameness {0:P0}, $hud_tamehungry", 1f - st.TameLeft / total);
+			TameAssistMessage(zdo.GetPosition(), text);
 		}
 		if (st.TameLeft <= 0f)
 		{
@@ -496,6 +784,37 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		Logger.LogInfo($"{s.Prefab} born at {Format(pos)}.");
 	}
 
+	// TameAssist's MessageTypes: None, TopLeftNear, TopLeftFar, CenterNear, CenterFar, InWorld.
+	private void TameAssistMessage(Vector3 pos, string text)
+	{
+		string type = _feeding.ProgressMessageType;
+		if (type == "InWorld")
+		{
+			float range2 = _messageRange.Value * _messageRange.Value;
+			foreach (ZNetPeer peer in ZNet.instance.GetPeers())
+			{
+				if ((peer.GetRefPos() - pos).sqrMagnitude <= range2)
+				{
+					// Same payload as DamageText.ShowText: type, position, text, from-player flag.
+					ZPackage pkg = new ZPackage();
+					pkg.Write((int)DamageText.TextType.Normal);
+					pkg.Write(pos);
+					pkg.Write(text);
+					pkg.Write(false);
+					ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, "RPC_DamageText", pkg);
+				}
+			}
+		}
+		else if (type.StartsWith("TopLeft", StringComparison.Ordinal))
+		{
+			Message(pos, MessageHud.MessageType.TopLeft, text);
+		}
+		else if (type.StartsWith("Center", StringComparison.Ordinal))
+		{
+			Message(pos, MessageHud.MessageType.Center, text);
+		}
+	}
+
 	private void Message(Vector3 pos, MessageHud.MessageType type, string text)
 	{
 		float range2 = _messageRange.Value * _messageRange.Value;
@@ -582,7 +901,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			}
 			else if (!zdo.GetBool(ZDOVars.s_tamed))
 			{
-				float total = Mathf.Max(1f, s.TamingMinutes.Value * 60f);
+				float total = TamingSeconds(s);
 				float left = st.TameLeft < 0f ? total : st.TameLeft;
 				text = $"wild, taming {(1f - left / total) * 100f:0}% ({left / 60f:0.0} min left), {fed}";
 			}
