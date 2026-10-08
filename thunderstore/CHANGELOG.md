@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.6
+
+- Fix runaway breeding: animals that were already pregnant gave birth even after `MaxCreatures` was
+  reached, and animals that left the pen formed new small groups that each bred up to the limit.
+  Pregnancies now count toward `MaxCreatures`, the limit is checked again at birth, and the new
+  `[Breeding] MaxTamedNearby` (30, `0` = no limit) stops breeding once that many tamed animals of the
+  kind are anywhere around players.
+
 ## 1.1.5
 
 - `MaxCreatures` per animal: `[Deer] MaxCreatures` and `[Neck] MaxCreatures` (`-1`, the default, uses

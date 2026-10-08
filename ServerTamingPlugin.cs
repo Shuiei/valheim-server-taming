@@ -30,7 +30,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "Tie.ServerTaming";
 
-	public const string Version = "1.1.5";
+	public const string Version = "1.1.6";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -75,6 +75,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private ConfigEntry<float> _populationRange;
 
 	private ConfigEntry<int> _maxCreatures;
+
+	private ConfigEntry<int> _maxTamedNearby;
 
 	private ConfigEntry<bool> _debugLog;
 
@@ -231,6 +233,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		_partnerRange = Config.Bind("Breeding", "PartnerRange", 5f, "A tamed partner of the same kind must be within this many metres.");
 		_populationRange = Config.Bind("Breeding", "PopulationRange", 15f, "Radius used to count animals of the same kind for MaxCreatures.");
 		_maxCreatures = Config.Bind("Breeding", "MaxCreatures", 8, "No new love points when this many animals of the same kind are within PopulationRange. Each animal's own MaxCreatures setting overrides this.");
+		_maxTamedNearby = Config.Bind("Breeding", "MaxTamedNearby", 30, "No breeding when this many tamed animals of the same kind are anywhere in the area loaded around players, wherever they wandered (0 = no limit). A safety net for animals that leave the pen, where MaxCreatures only sees their small group.");
 		AddSpecies("Deer", "Raspberry,Blueberries,Cloudberry,Carrot,Turnip,Onion,Mushroom,MushroomYellow", 25f, 5f, 10f);
 		AddSpecies("Neck", "FishRaw", 25f, 5f, 10f);
 		new Terminal.ConsoleCommand("tamestatus", "[radius] - show server taming/breeding progress of animals near you; use through 'server tamestatus'", Status);
@@ -843,6 +846,13 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			if (now - st.Pregnant >= s.PregnancyMinutes.Value * 60.0)
 			{
 				st.Pregnant = 0.0;
+				// Checked again: the herd may have grown (or wandered in) during the pregnancy.
+				string crowded = Crowded(zdo, s, atBirth: true);
+				if (crowded != null)
+				{
+					Logger.LogInfo($"{s.Prefab} birth at {Format(zdo.GetPosition())} skipped: {crowded}.");
+					return;
+				}
 				Birth(zdo, s);
 			}
 			return;
@@ -857,31 +867,10 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		{
 			return;
 		}
-		Vector3 pos = zdo.GetPosition();
-		float population2 = _populationRange.Value * _populationRange.Value;
-		float partner2 = _partnerRange.Value * _partnerRange.Value;
-		int count = 0;
-		bool partner = false;
-		foreach (ZDO other in _animals)
+		string full = Crowded(zdo, s, atBirth: false);
+		if (full != null)
 		{
-			if (other.GetPrefab() != s.Hash)
-			{
-				continue;
-			}
-			float d2 = (other.GetPosition() - pos).sqrMagnitude;
-			if (d2 <= population2)
-			{
-				count++;
-			}
-			if (other != zdo && d2 <= partner2 && other.GetBool(ZDOVars.s_tamed))
-			{
-				partner = true;
-			}
-		}
-		int max = s.MaxCreatures.Value >= 0 ? s.MaxCreatures.Value : _maxCreatures.Value;
-		if (!partner || count >= max)
-		{
-			Debug($"{Describe(zdo)}: no love point ({(partner ? "" : "no tamed partner in range, ")}{count} of MaxCreatures {max} nearby).");
+			Debug($"{Describe(zdo)}: no love point ({full}).");
 			return;
 		}
 		Debug($"{Describe(zdo)}: love {st.Love + 1}/{Mathf.Max(1, _requiredLovePoints.Value)}.");
@@ -890,6 +879,58 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			st.Love = 0;
 			st.Pregnant = now;
 		}
+	}
+
+	// Why this animal can't breed now, or null. Before a love point, pregnant animals nearby count once
+	// more each for the birth they will give, so many pregnancies at once can't overshoot MaxCreatures.
+	// At birth only the animals themselves count, and no partner is needed.
+	private string Crowded(ZDO zdo, Species s, bool atBirth)
+	{
+		Vector3 pos = zdo.GetPosition();
+		float population2 = _populationRange.Value * _populationRange.Value;
+		float partner2 = _partnerRange.Value * _partnerRange.Value;
+		int count = 0;
+		int tamed = 0;
+		bool partner = false;
+		foreach (ZDO other in _animals)
+		{
+			if (other.GetPrefab() != s.Hash)
+			{
+				continue;
+			}
+			bool otherTamed = other.GetBool(ZDOVars.s_tamed);
+			if (otherTamed)
+			{
+				tamed++;
+			}
+			float d2 = (other.GetPosition() - pos).sqrMagnitude;
+			if (d2 <= population2)
+			{
+				count++;
+				if (!atBirth && other != zdo && _states.TryGetValue(other.m_uid, out State os) && os.Pregnant > 0.0)
+				{
+					count++;
+				}
+			}
+			if (other != zdo && d2 <= partner2 && otherTamed)
+			{
+				partner = true;
+			}
+		}
+		int max = s.MaxCreatures.Value >= 0 ? s.MaxCreatures.Value : _maxCreatures.Value;
+		if (!atBirth && !partner)
+		{
+			return "no tamed partner in range";
+		}
+		if (count >= max)
+		{
+			return $"{count} of MaxCreatures {max} nearby{(atBirth ? "" : ", counting pregnancies")}";
+		}
+		if (_maxTamedNearby.Value > 0 && tamed >= _maxTamedNearby.Value)
+		{
+			return $"{tamed} tamed {s.Prefab} around players, MaxTamedNearby {_maxTamedNearby.Value}";
+		}
+		return null;
 	}
 
 	// Creates the offspring directly as a ZDO (like ZNetView.Awake does) so the server does not need
