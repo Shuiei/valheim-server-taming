@@ -29,7 +29,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "local.servertaming";
 
-	public const string Version = "1.1.3";
+	public const string Version = "1.1.4";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -75,6 +75,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 	private ConfigEntry<int> _maxCreatures;
 
+	private ConfigEntry<bool> _debugLog;
+
 	private readonly List<Species> _species = new List<Species>();
 
 	private readonly Dictionary<int, Species> _speciesByPrefab = new Dictionary<int, Species>();
@@ -82,6 +84,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private readonly HashSet<int> _foodPrefabs = new HashSet<int>();
 
 	private readonly Dictionary<ZDOID, State> _states = new Dictionary<ZDOID, State>();
+
+	// States of animals the server just destroyed, waiting for the copy that replaces them.
+	private readonly List<Orphan> _orphans = new List<Orphan>();
 
 	private readonly List<ZDO> _sectorObjects = new List<ZDO>();
 
@@ -165,6 +170,21 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		public ZNetView View;
 	}
 
+	private sealed class Orphan
+	{
+		public int Prefab;
+
+		public Vector3 Pos;
+
+		public int Level;
+
+		public float At;
+
+		public ZDOID From;
+
+		public State State;
+	}
+
 	private sealed class State
 	{
 		public float TameLeft;
@@ -188,6 +208,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		_requireCalm = Config.Bind("General", "RequireCalm", true, "Taming and breeding pause while the animal is alerted (fleeing or fighting), like vanilla.");
 		_messageRange = Config.Bind("General", "MessageRange", 30f, "Players within this many metres see taming and birth messages.");
 		_progressMessages = Config.Bind("General", "ProgressMessages", true, "Show taming progress to nearby players: at 25/50/75%, or with TameAssist's TamingProgressMessageType when TameAssist is used.");
+		_debugLog = Config.Bind("General", "DebugLog", false, "Log feeding, love and breeding decisions for every animal near players (verbose; for troubleshooting).");
 		_maxTameStars = Config.Bind("General", "MaxTameStars", -1, "Highest star count that can be tamed; -1 means any (including the 3+ star creatures from level mods such as ServersideQoL CreatureLevelUp). Offspring keep their parent's stars.");
 		_useTameAssist = Config.Bind("Containers", "UseTameAssistSettings", true, "When ServersideQoL TameAssist is installed, use its FeedFromContainers settings (range, chest sign range, LeaveAtLeast), its TamingTimeMultiplier and FedDurationMultiplier, and its TamingProgressMessageType. The two settings below are then ignored.");
 		_containerRange = Config.Bind("Containers", "FeedFromContainersRange", 0f, "Without TameAssist: animals eat from chests within this many metres (0 = off).");
@@ -202,7 +223,9 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		AddSpecies("Deer", "Raspberry,Blueberries,Cloudberry,Carrot,Turnip,Onion,Mushroom,MushroomYellow", 25f, 5f, 10f);
 		AddSpecies("Neck", "FishRaw", 25f, 5f, 10f);
 		new Terminal.ConsoleCommand("tamestatus", "[radius] - show server taming/breeding progress of animals near you; use through 'server tamestatus'", Status);
-		new Harmony(Guid).PatchAll(typeof(SavePatch));
+		Harmony harmony = new Harmony(Guid);
+		harmony.PatchAll(typeof(SavePatch));
+		harmony.PatchAll(typeof(DestroyPatch));
 	}
 
 	private void AddSpecies(string prefab, string foods, float taming, float fed, float pregnancy)
@@ -259,6 +282,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		{
 			_resolved = false;
 			_states.Clear();
+			_orphans.Clear();
 			_lastTick = -1.0;
 			return;
 		}
@@ -380,7 +404,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 	private State GetState(ZDO zdo)
 	{
-		if (!_states.TryGetValue(zdo.m_uid, out State st))
+		if (!_states.TryGetValue(zdo.m_uid, out State st) && (st = Adopt(zdo)) == null)
 		{
 			// Values saved into the ZDO at the last world save; ZDOIDs change on every load.
 			st = new State
@@ -393,6 +417,82 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			_states[zdo.m_uid] = st;
 		}
 		return st;
+	}
+
+	// Other server mods replace a creature's ZDO with a copy under a new ZDOID: ServersideQoL
+	// CreatureLevelUp does it for 3+ star creatures to show their stars and size. The copy carries the
+	// values from the last world save only, so the live state moves over to it here.
+	private void Orphaned(ZDO zdo)
+	{
+		if (!_states.TryGetValue(zdo.m_uid, out State st))
+		{
+			return;
+		}
+		_states.Remove(zdo.m_uid);
+		_orphans.RemoveAll(o => Time.time - o.At > 60f);
+		_orphans.Add(new Orphan
+		{
+			Prefab = zdo.GetPrefab(),
+			Pos = zdo.GetPosition(),
+			Level = zdo.GetInt(ZDOVars.s_level, 1),
+			At = Time.time,
+			From = zdo.m_uid,
+			State = st
+		});
+	}
+
+	private State Adopt(ZDO zdo)
+	{
+		if (_orphans.Count == 0)
+		{
+			return null;
+		}
+		int prefab = zdo.GetPrefab();
+		int level = zdo.GetInt(ZDOVars.s_level, 1);
+		Vector3 pos = zdo.GetPosition();
+		Orphan best = _orphans.Where(o => o.Prefab == prefab && o.Level == level && Time.time - o.At <= 60f && (o.Pos - pos).sqrMagnitude <= 100f)
+			.OrderBy(o => (o.Pos - pos).sqrMagnitude).FirstOrDefault();
+		if (best == null)
+		{
+			return null;
+		}
+		_orphans.Remove(best);
+		_states[zdo.m_uid] = best.State;
+		Debug($"{zdo.m_uid}: took over the state of replaced {best.From} (level {level}).");
+		return best.State;
+	}
+
+	private string Describe(ZDO zdo)
+	{
+		Vector3 p = zdo.GetPosition();
+		return $"{_speciesByPrefab[zdo.GetPrefab()].Prefab} {zdo.m_uid} ({zdo.GetInt(ZDOVars.s_level, 1) - 1} star(s), {(zdo.GetBool(ZDOVars.s_tamed) ? "tamed" : "wild")}, owner {zdo.GetOwner()}) at ({p.x:0}, {p.y:0}, {p.z:0})";
+	}
+
+	private void Debug(string text)
+	{
+		if (_debugLog.Value)
+		{
+			Logger.LogInfo(text);
+		}
+	}
+
+	[HarmonyPatch(typeof(ZDOMan), nameof(ZDOMan.DestroyZDO))]
+	private static class DestroyPatch
+	{
+		private static void Prefix(ZDO zdo)
+		{
+			try
+			{
+				if (zdo != null && _instance != null && _instance._speciesByPrefab.ContainsKey(zdo.GetPrefab()))
+				{
+					_instance.Orphaned(zdo);
+				}
+			}
+			catch (Exception ex)
+			{
+				_instance?.Logger.LogError(ex);
+			}
+		}
 	}
 
 	private PrefabKind Classify(int prefab)
@@ -513,9 +613,14 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 	private void TryEat(ZDO animal, Species s, State st, double now, bool tamed)
 	{
-		if (TryEatFromGround(animal, s) || ((tamed || _feedWildFromContainers.Value) && TryEatFromChest(animal, s)))
+		string source = TryEatFromGround(animal, s) ? "the ground" : (tamed || _feedWildFromContainers.Value) && TryEatFromChest(animal, s) ? "a chest" : null;
+		if (source != null)
 		{
 			st.FedUntil = now + s.FedMinutes.Value * 60.0 * _feeding.FedMultiplier;
+		}
+		if (_debugLog.Value)
+		{
+			Debug($"{Describe(animal)} is hungry: " + (source != null ? "ate from " + source + "." : $"no food found ({_chests.Count(c => _chestRanges.ContainsKey(c.m_uid))} feeding chest(s) loaded)."));
 		}
 	}
 
@@ -763,8 +868,10 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		}
 		if (!partner || count >= _maxCreatures.Value)
 		{
+			Debug($"{Describe(zdo)}: no love point ({(partner ? "" : "no tamed partner in range, ")}{count} of MaxCreatures {_maxCreatures.Value} nearby).");
 			return;
 		}
+		Debug($"{Describe(zdo)}: love {st.Love + 1}/{Mathf.Max(1, _requiredLovePoints.Value)}.");
 		if (++st.Love >= Mathf.Max(1, _requiredLovePoints.Value))
 		{
 			st.Love = 0;

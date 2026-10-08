@@ -63,4 +63,6 @@ dotnet build -c Release -p:ValheimDir=/path/to/valheim_server
 - **Progress storage:** progress is kept in server memory. Writing it into objects that players' games control would be lost to their next update. Just before the world saves, it's copied into the objects' saved data, and it's read back after a restart. This is needed because object IDs change on every world load.
 - **Taming:** the server asks the player's game that controls the animal to run the vanilla `RPC_SetTamed`. If no player's game controls the animal, the server sets the flag directly.
 - **Eating:** the server takes control of the food item, then lowers its stack or removes it.
+- **Replaced creatures:** ServersideQoL CreatureLevelUp replaces 3+ star creatures with a copy under a new ID, to show their stars and size. ServerTaming moves the animal's taming, fed, love and pregnancy state over to the copy, so 3+ star animals don't lose their progress.
+- **Troubleshooting:** set `[General] DebugLog = true` to log every feeding, love point and breeding decision for animals near players.
 - **Births:** the server creates the new adult directly, already marked as tamed. The nearest player's game takes control of it and shows a vanilla deer or neck.
