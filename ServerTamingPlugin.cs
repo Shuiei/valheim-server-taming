@@ -30,7 +30,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "Tie.ServerTaming";
 
-	public const string Version = "1.1.4";
+	public const string Version = "1.1.5";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 
@@ -78,11 +78,28 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 	private ConfigEntry<bool> _debugLog;
 
+	private ConfigEntry<bool> _birthAtParent;
+
 	private readonly List<Species> _species = new List<Species>();
 
 	private readonly Dictionary<int, Species> _speciesByPrefab = new Dictionary<int, Species>();
 
 	private readonly HashSet<int> _foodPrefabs = new HashSet<int>();
+
+	// Creatures the game itself breeds (Procreation component): boar, wolf, lox, hen, asksvin, ...
+	private readonly Dictionary<int, Breeder> _breeders = new Dictionary<int, Breeder>();
+
+	private readonly List<ZDO> _vanilla = new List<ZDO>();
+
+	private static readonly int s_hasFields = "HasFields".GetStableHashCode();
+
+	private static readonly int s_hasProcreationFields = "HasFieldsProcreation".GetStableHashCode();
+
+	private static readonly int s_maxCreaturesField = "Procreation.m_maxCreatures".GetStableHashCode();
+
+	private static readonly int s_spawnOffsetField = "Procreation.m_spawnOffset".GetStableHashCode();
+
+	private static readonly int s_spawnOffsetMaxField = "Procreation.m_spawnOffsetMax".GetStableHashCode();
 
 	private readonly Dictionary<ZDOID, State> _states = new Dictionary<ZDOID, State>();
 
@@ -162,6 +179,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 
 		public ConfigEntry<float> PregnancyMinutes;
 
+		public ConfigEntry<int> MaxCreatures;
+
 		public int Hash;
 
 		public string Name;
@@ -169,6 +188,17 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		public HashSet<int> FoodHashes = new HashSet<int>();
 
 		public ZNetView View;
+	}
+
+	private sealed class Breeder
+	{
+		public ConfigEntry<int> MaxCreatures;
+
+		public int Default;
+
+		public float SpawnOffset;
+
+		public float SpawnOffsetMax;
 	}
 
 	private sealed class Orphan
@@ -228,7 +258,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		_requiredLovePoints = Config.Bind("Breeding", "RequiredLovePoints", 4, "Love points needed to become pregnant.");
 		_partnerRange = Config.Bind("Breeding", "PartnerRange", 5f, "A tamed partner of the same kind must be within this many metres.");
 		_populationRange = Config.Bind("Breeding", "PopulationRange", 15f, "Radius used to count animals of the same kind for MaxCreatures.");
-		_maxCreatures = Config.Bind("Breeding", "MaxCreatures", 8, "No new love points when this many animals of the same kind are within PopulationRange.");
+		_maxCreatures = Config.Bind("Breeding", "MaxCreatures", 8, "No new love points when this many animals of the same kind are within PopulationRange. Each animal's own MaxCreatures setting overrides this.");
+		_birthAtParent = Config.Bind("VanillaBreeding", "BirthAtParent", false, "Babies of the creatures the game breeds itself (boar, wolf, lox, hen, ...) appear where the parent stands instead of about 2 m behind it, so they can't end up on the other side of a pen fence. Deer and neck babies always appear between their parents.");
 		AddSpecies("Deer", "Raspberry,Blueberries,Cloudberry,Carrot,Turnip,Onion,Mushroom,MushroomYellow", 25f, 5f, 10f);
 		AddSpecies("Neck", "FishRaw", 25f, 5f, 10f);
 		new Terminal.ConsoleCommand("tamestatus", "[radius] - show server taming/breeding progress of animals near you; use through 'server tamestatus'", Status);
@@ -247,7 +278,8 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			TamingMinutes = Config.Bind(prefab, "TamingMinutes", taming, "Minutes of being fed (and calm) needed to tame it."),
 			FedMinutes = Config.Bind(prefab, "FedMinutes", fed, "Minutes one food item keeps it fed."),
 			Breeding = Config.Bind(prefab, "Breeding", true, "Tamed ones breed and give birth to tamed adults."),
-			PregnancyMinutes = Config.Bind(prefab, "PregnancyMinutes", pregnancy, "Minutes from pregnancy to birth.")
+			PregnancyMinutes = Config.Bind(prefab, "PregnancyMinutes", pregnancy, "Minutes from pregnancy to birth."),
+			MaxCreatures = Config.Bind(prefab, "MaxCreatures", -1, "No new love points when this many " + prefab + " are within [Breeding] PopulationRange; -1 uses [Breeding] MaxCreatures.")
 		});
 	}
 
@@ -255,6 +287,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private void Resolve()
 	{
 		_resolved = true;
+		ResolveBreeders();
 		foreach (Species s in _species)
 		{
 			GameObject go = ZNetScene.instance.GetPrefab(s.Prefab);
@@ -320,12 +353,16 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 		double now = ZNet.instance.GetTimeSeconds();
 		float dt = _lastTick < 0.0 ? 0f : Mathf.Clamp((float)(now - _lastTick), 0f, Mathf.Max(1f, _tickSeconds.Value) * 3f);
 		_lastTick = now;
-		if (_speciesByPrefab.Count == 0)
+		if (_speciesByPrefab.Count == 0 && _breeders.Count == 0)
 		{
 			return;
 		}
 		_feeding = ReadFeeding();
 		Collect();
+		foreach (ZDO zdo in _vanilla)
+		{
+			ApplyBreedingLimit(zdo);
+		}
 		UpdateChestRanges();
 		_eaten.Clear();
 		foreach (ZDO zdo in _animals)
@@ -365,6 +402,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private void Collect()
 	{
 		_animals.Clear();
+		_vanilla.Clear();
 		_foods.Clear();
 		_chests.Clear();
 		_signs.Clear();
@@ -390,6 +428,10 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 				if (_speciesByPrefab.ContainsKey(prefab))
 				{
 					_animals.Add(zdo);
+				}
+				else if (_breeders.ContainsKey(prefab))
+				{
+					_vanilla.Add(zdo);
 				}
 				else if (_foodPrefabs.Contains(prefab) && !zdo.GetBool(ZDOVars.s_piece))
 				{
@@ -426,6 +468,86 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 			_states[zdo.m_uid] = st;
 		}
 		return st;
+	}
+
+	// One MaxCreatures setting per creature the game breeds itself, in [VanillaBreeding]. The game reads
+	// it from the creature's ZDO through its per-object field overrides (ZNetView.LoadFields), so players
+	// need no mod. -1 keeps the game's value.
+	private void ResolveBreeders()
+	{
+		_breeders.Clear();
+		foreach (GameObject go in ZNetScene.instance.m_prefabs.OrderBy(g => g.name, StringComparer.Ordinal))
+		{
+			Procreation procreation = go.GetComponent<Procreation>();
+			if (procreation == null || go.GetComponent<Character>() == null || go.GetComponent<Tameable>() == null || go.GetComponent<ZNetView>() == null)
+			{
+				continue;
+			}
+			_breeders[go.name.GetStableHashCode()] = new Breeder
+			{
+				MaxCreatures = Config.Bind("VanillaBreeding", go.name, -1, $"Tamed {go.name} stop breeding when this many {go.name} and their young are within {procreation.m_totalCheckRange:0.#} m (the game's check). -1 keeps the game's value, {procreation.m_maxCreatures}."),
+				Default = procreation.m_maxCreatures,
+				SpawnOffset = procreation.m_spawnOffset,
+				SpawnOffsetMax = procreation.m_spawnOffsetMax
+			};
+		}
+		Logger.LogInfo($"Vanilla breeding limits for {_breeders.Count} creature(s): " + string.Join(", ", _breeders.Values.Where(b => b.MaxCreatures.Value >= 0).Select(b => b.MaxCreatures.Definition.Key + " " + b.MaxCreatures.Value).DefaultIfEmpty("none changed")));
+	}
+
+	// The game reads the override only when a player's game loads the creature, so a creature whose
+	// value changes is replaced with an identical copy, the way ServersideQoL applies its overrides.
+	private void ApplyBreedingLimit(ZDO zdo)
+	{
+		if (!zdo.GetBool(ZDOVars.s_tamed))
+		{
+			return;
+		}
+		Breeder b = _breeders[zdo.GetPrefab()];
+		bool atParent = _birthAtParent.Value;
+		bool changed = Override(zdo, s_maxCreaturesField, b.MaxCreatures.Value >= 0 ? b.MaxCreatures.Value : null, b.Default);
+		changed |= Override(zdo, s_spawnOffsetField, atParent ? 0f : null, b.SpawnOffset);
+		changed |= Override(zdo, s_spawnOffsetMaxField, atParent ? 0f : null, b.SpawnOffsetMax);
+		if (!changed)
+		{
+			return;
+		}
+		zdo.Set(s_hasFields, true);
+		zdo.Set(s_hasProcreationFields, true);
+		ZPackage pkg = new ZPackage();
+		zdo.Serialize(pkg);
+		pkg.SetPos(0);
+		ZDO copy = ZDOMan.instance.CreateNewZDO(zdo.GetPosition(), zdo.GetPrefab());
+		copy.Deserialize(pkg);
+		copy.SetOwner(0L);
+		zdo.SetOwnerInternal(ZDOMan.GetSessionID());
+		ZDOMan.instance.DestroyZDO(zdo);
+		Debug($"{b.MaxCreatures.Definition.Key} {zdo.m_uid}: breeding limit {zdo.GetInt(s_maxCreaturesField, b.Default)}, birth at parent {atParent}; replaced by {copy.m_uid}.");
+	}
+
+	// Sets a field override to the wanted value; with no wanted value, an existing override goes back to
+	// the game's value. Returns whether the ZDO changed.
+	private static bool Override(ZDO zdo, int key, int? wanted, int gameValue)
+	{
+		bool has = zdo.GetInt(key, out int current);
+		int value = wanted ?? gameValue;
+		if (wanted == null && !has || has && current == value)
+		{
+			return false;
+		}
+		zdo.Set(key, value);
+		return true;
+	}
+
+	private static bool Override(ZDO zdo, int key, float? wanted, float gameValue)
+	{
+		bool has = zdo.GetFloat(key, out float current);
+		float value = wanted ?? gameValue;
+		if (wanted == null && !has || has && current == value)
+		{
+			return false;
+		}
+		zdo.Set(key, value);
+		return true;
 	}
 
 	// Other server mods replace a creature's ZDO with a copy under a new ZDOID: ServersideQoL
@@ -875,9 +997,10 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 				partner = true;
 			}
 		}
-		if (!partner || count >= _maxCreatures.Value)
+		int max = s.MaxCreatures.Value >= 0 ? s.MaxCreatures.Value : _maxCreatures.Value;
+		if (!partner || count >= max)
 		{
-			Debug($"{Describe(zdo)}: no love point ({(partner ? "" : "no tamed partner in range, ")}{count} of MaxCreatures {_maxCreatures.Value} nearby).");
+			Debug($"{Describe(zdo)}: no love point ({(partner ? "" : "no tamed partner in range, ")}{count} of MaxCreatures {max} nearby).");
 			return;
 		}
 		Debug($"{Describe(zdo)}: love {st.Love + 1}/{Mathf.Max(1, _requiredLovePoints.Value)}.");
