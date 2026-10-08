@@ -4,9 +4,6 @@
 
 - `MaxCreatures` per animal: `[Deer] MaxCreatures` and `[Neck] MaxCreatures` (`-1`, the default, uses
   `[Breeding] MaxCreatures`).
-- `[VanillaBreeding]`: a `MaxCreatures` per creature the game breeds itself (boar, wolf, lox, hen,
-  asksvin, ...; `-1` keeps the game's limit), and `BirthAtParent` so their babies appear where the
-  parent stands and stay inside the pen. Server-side only, through the game's per-creature overrides.
 
 ## 1.1.4
 
