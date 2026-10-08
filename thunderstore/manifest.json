@@ -1,0 +1,9 @@
+{
+  "name": "ServerTaming",
+  "version_number": "@VERSION@",
+  "website_url": "https://github.com/Shuiei/valheim-server-taming",
+  "description": "Server-side only: tame and breed Deer and Necks. Players need no mod, so it works with vanilla and crossplay (console) clients.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2351"
+  ]
+}

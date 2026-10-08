@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
@@ -27,7 +28,7 @@ namespace ServerTaming;
 [BepInPlugin(Guid, "ServerTaming", Version)]
 public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
-	public const string Guid = "local.servertaming";
+	public const string Guid = "Tie.ServerTaming";
 
 	public const string Version = "1.1.4";
 
@@ -203,6 +204,14 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 	private void Awake()
 	{
 		_instance = this;
+		// Before 1.1.4 the plugin ID, and so the config file name, was local.servertaming.
+		string oldConfig = Path.Combine(Paths.ConfigPath, "local.servertaming.cfg");
+		if (!File.Exists(Config.ConfigFilePath) && File.Exists(oldConfig))
+		{
+			File.Move(oldConfig, Config.ConfigFilePath);
+			Config.Reload();
+			Logger.LogInfo("Moved local.servertaming.cfg to " + Path.GetFileName(Config.ConfigFilePath) + ".");
+		}
 		_tickSeconds = Config.Bind("General", "TickSeconds", 5f, "How often (seconds) animals near players are checked.");
 		_feedRadius = Config.Bind("General", "FeedRadius", 8f, "Animals eat matching food lying within this many metres. They do not walk to it, so keep them penned with the food inside.");
 		_requireCalm = Config.Bind("General", "RequireCalm", true, "Taming and breeding pause while the animal is alerted (fleeing or fighting), like vanilla.");

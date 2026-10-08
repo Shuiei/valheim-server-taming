@@ -1,6 +1,8 @@
 # ServerTaming
 
-A server-only BepInEx plugin for Valheim that makes **Deer** and **Necks** tameable and breedable. Players don't need any mod, so it works with vanilla and crossplay (console) clients.
+A BepInEx plugin for Valheim that makes **Deer** and **Necks** tameable and breedable.
+
+> **Server-side only.** Install it on the dedicated server only. Players don't install anything, so it works with vanilla clients and with crossplay players on console or Game Pass.
 
 ## How it works
 
@@ -32,7 +34,7 @@ Default foods:
 | Deer | Raspberry, Blueberries, Cloudberry, Carrot, Turnip, Onion, Mushroom, MushroomYellow |
 | Neck | FishRaw |
 
-All of these can be changed in `BepInEx/config/local.servertaming.cfg`. Each animal has its own section: `Enabled`, `Foods`, `TamingMinutes`, `FedMinutes`, `Breeding` and `PregnancyMinutes`.
+All of these can be changed in `BepInEx/config/Tie.ServerTaming.cfg`. Each animal has its own section: `Enabled`, `Foods`, `TamingMinutes`, `FedMinutes`, `Breeding` and `PregnancyMinutes`.
 
 ## Limitations
 
@@ -48,7 +50,7 @@ With [ServerDevcommands](https://thunderstore.io/c/valheim/p/JereKuusela/Server_
 
 ## Installation
 
-Put `ServerTaming.dll` in `BepInEx/plugins/ServerTaming/` on the **dedicated server** only.
+Put `ServerTaming.dll` in `BepInEx/plugins/ServerTaming/` on the **dedicated server** only. Players don't install anything: no client mod is needed or used.
 
 ## Building
 
