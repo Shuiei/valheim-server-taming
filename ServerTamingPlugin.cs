@@ -30,7 +30,7 @@ public sealed class ServerTamingPlugin : BaseUnityPlugin
 {
 	public const string Guid = "Tie.ServerTaming";
 
-	public const string Version = "1.1.6";
+	public const string Version = "1.1.7";
 
 	private static readonly int KeyTameLeft = "ServerTaming_tameLeft".GetStableHashCode();
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.7
+
+- Mod page only: a Buy Me a Coffee button. No change to the mod.
+
 ## 1.1.6
 
 - Fix runaway breeding: animals that were already pregnant gave birth even after `MaxCreatures` was

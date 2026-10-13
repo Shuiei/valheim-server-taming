@@ -53,6 +53,12 @@ With [ServerDevcommands](https://thunderstore.io/c/valheim/p/JereKuusela/Server_
 
 Put `ServerTaming.dll` in `BepInEx/plugins/ServerTaming/` on the **dedicated server** only. Players don't install anything: no client mod is needed or used.
 
+## Support
+
+If this mod saved you some trouble:
+
+[![Buy me a coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/tieboo)
+
 ## Building
 
 The project targets .NET Framework 4.7.2. It references the game and BepInEx assemblies from a Valheim dedicated server install with BepInEx. By default it looks two folders above the project; you can point it somewhere else:
